@@ -1,0 +1,180 @@
+#!/bin/bash
+
+#!/bin/bash
+
+# use
+#
+#     $0 domain 10
+#
+# to fetch 10 domains at a time
+
+source ~/.lib/string.sh
+source ~/.lib/curlexitcodes.sh
+BROWSER="/home/ychaouche/DOWNLOADS/APPS/waterfox-g4-0.5.1-69.1.Build69.1.glibc2.17-x86_64.AppImage"
+
+function tld.get {
+    IFS=.
+    set -- $1
+    echo "${!#}"
+}
+
+
+function getnextdomain {
+    local domain="$1" ns result nextdomain
+    # Loop over the NS array to find an NSEC record
+    for ns in "${nameservers[@]}"; do
+	ns="${ns%.}"  # Remove trailing dot if present
+	result=$(dig +short NSEC "$domain" @"$ns")
+	if [[ -n "$result" ]]; then
+	    nextdomain="$result"
+            break
+	fi
+    done
+    [[ -z "$nextdomain" ]] && return 1
+    # getting only the zone part
+    nextdomain="$(string.word.first "$nextdomain")"
+
+    # getting rid of the last dot "."
+    nextdomain="${nextdomain%.*}"
+    echo "$nextdomain"
+}
+
+
+function displaydomains {
+    echo "Fetched domains (batch size: $batch):"
+    for i in "${!domains[@]}"; do
+        printf "%02d. %s\n" $((i+1)) "${domains[i]}"
+    done | split  -l 10 - /tmp/domains.
+    pr -m -t -w 150 /tmp/domains.*
+}
+
+
+function getuserinput {
+    # Read command line with bash pure parsing
+    read -rp "Enter command ([c]ontinue, [q]uit, [o]pen num(s), [b]atch num, [s]top): " userinput
+    echo "$userinput"
+}
+
+function openlinks.urls {
+    local userinput="$1"
+    read -ra urls <<< "$args"
+    for url in "${urls[@]}"
+    do
+        echo "Opening domain $url"
+        "$BROWSER" "$url" &
+    done
+}
+
+function openlinks.numbers {
+    local userinput="$1" args opend_any idx_str idx opendomain
+
+    # Replace commas by spaces, then split with IFS by spaces
+    args="${userinput//,/ }"    
+    read -ra indices <<< "$args"
+    opened_any=0
+    for idx_str in "${indices[@]}"; do
+        idx_str="${idx_str//[[:space:]]/}"
+        if [[ "$idx_str" =~ ^[0-9]+$ ]]; then
+            idx=$((idx_str - 1))
+            if (( idx >= 0 && idx < ${#domains[@]} )); then
+                opendomain="${domains[idx]}"
+                echo "Opening domain $((idx+1)): $opendomain"
+                "$BROWSER" "$opendomain" &
+                opened_any=1
+            else
+                echo "Invalid domain number: $idx_str"
+            fi
+        else
+            echo "Invalid number format: $idx_str"
+        fi
+    done
+}
+
+
+domain="$1"
+batch="${2:-10}"  # default batch=10 if not provided
+answer="c"
+count=0
+domains=()
+
+tld="$(tld.get "$domain")"
+# Get all NS of the TLD into a bash array
+mapfile -t nameservers < <(dig +short NS "$tld")
+
+
+while ! [[ "$answer" =~ ^[sq]$ ]]
+do
+    # only fetch new domains if explicitly told to
+    if [[ "$answer" =~ [cn] ]]
+    then
+	nextdomain=""
+	nextdomain=$(getnextdomain "$domain")
+	
+	if [[ -z "$nextdomain" ]]
+	then
+            echo "something doesn't seem right with $domain"
+            exit 1
+	fi
+        
+	# Store the domain in the array
+	domains+=("$nextdomain")
+	count=$((count + 1))	
+    fi
+
+    # Check if we have reached the batch size
+    # that's if count is a multiple of batch
+    # which means count % batch is 0
+    # when that happens then if (( count % batch )) would 
+    if (( count % batch == 0 ))
+    then
+        displaydomains
+	userinput="$(getuserinput)"
+        
+        # Extract cmd and args in pure bash
+        cmd="${userinput%% *}"
+        args="${userinput#* }"
+        if [[ "$cmd" == "$userinput" ]]; then
+            args=""
+        fi
+        # convert cmd to lowercase
+        cmd="${cmd,,}"
+	answer=""
+        case "$cmd" in
+            c|n)
+                answer="c"
+		# Reset domains array for next batch
+		domains=()			
+                ;;
+            q|quit|s|stop)
+                answer="q"
+                ;;
+            o|open)
+		openlinks.urls "$args"		
+                ;;
+            b|batch)
+                if [[ "$args" =~ ^[0-9]+$ && "$args" -gt 0 ]]; then
+                    batch="$args"
+                    echo "Batch size changed to $batch"
+                else
+                    echo "Usage: b positive_number"
+                fi
+                #answer="c"
+                ;;
+	    [0-9,]*)
+		openlinks.numbers "$userinput"
+		;;
+	    *)
+		echo "Unknown command $cmd"
+                ;;
+        esac
+    fi
+    domain="$nextdomain"
+done
+
+# Afficher les domaines restants après la dernière itération s'il y en a
+if (( count % batch != 0 )); then
+    echo "Fetched domains (last partial batch):"
+    for i in "${!domains[@]}"; do
+        printf "%02d. %s\n" $((i+1)) "${domains[i]}"
+    done
+fi
